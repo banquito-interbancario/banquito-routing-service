@@ -16,6 +16,8 @@ public class PaymentBatch {
 
     private String status; // PROCESSING, COMPLETING, COMPLETED, FAILED
 
+    private String originatingAccount;
+
     private int declaredTotalRecords;
     private int successfulRecords;
     private int rejectedRecords;
@@ -49,6 +51,9 @@ public class PaymentBatch {
 
     public double getRejectedAmount() { return rejectedAmount; }
     public void setRejectedAmount(double rejectedAmount) { this.rejectedAmount = rejectedAmount; }
+
+    public String getOriginatingAccount() { return originatingAccount; }
+    public void setOriginatingAccount(String originatingAccount) { this.originatingAccount = originatingAccount; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }

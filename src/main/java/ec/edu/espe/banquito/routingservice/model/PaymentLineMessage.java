@@ -26,14 +26,16 @@ public class PaymentLineMessage {
     @JsonProperty("beneficiary_email")
     private String beneficiaryEmail;
 
-    // Alan no envía este campo — queda en null, no afecta el procesamiento
     @JsonProperty("transaction_uuid")
     private String transactionUuid;
 
-    // Alan no envía este campo — sin él el batch queda en PROCESSING indefinidamente
-    // Workaround: se maneja en RoutingService con declaredTotalRecords=0
     @JsonProperty("declared_total_records")
     private int declaredTotalRecords;
+
+    // cuenta_matriz del CSV. Alan debe agregar este campo al mensaje RabbitMQ.
+    // Si no viene, corporateDebit usará CORPORATE_ACCOUNT_NUMBER del properties.
+    @JsonProperty("originating_account")
+    private String originatingAccount;
 
     public String getBatchId() { return batchId; }
     public void setBatchId(String batchId) { this.batchId = batchId; }
@@ -64,4 +66,7 @@ public class PaymentLineMessage {
 
     public int getDeclaredTotalRecords() { return declaredTotalRecords; }
     public void setDeclaredTotalRecords(int declaredTotalRecords) { this.declaredTotalRecords = declaredTotalRecords; }
+
+    public String getOriginatingAccount() { return originatingAccount; }
+    public void setOriginatingAccount(String originatingAccount) { this.originatingAccount = originatingAccount; }
 }

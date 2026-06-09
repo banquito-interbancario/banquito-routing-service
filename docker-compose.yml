@@ -36,7 +36,8 @@ services:
       RABBITMQ_PASSWORD: guest
       RABBITMQ_QUEUE: payment.lines.queue
       RABBITMQ_CLEARING_QUEUE: clearing.outbound.queue
-      ACCOUNT_CORE_REST_URL: http://account-core-service:8081
+      CORE_GATEWAY_URL: http://account-core-service:8081
+      CORPORATE_ACCOUNT_NUMBER: "0000000000"
       ACCOUNT_CORE_GRPC_HOST: account-core-service
       ACCOUNT_CORE_GRPC_PORT: "9090"
       TARIFF_SERVICE_GRPC_HOST: tariff-service

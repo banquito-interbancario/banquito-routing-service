@@ -50,6 +50,9 @@ public class RoutingService {
     @Value("${app.rabbitmq.clearing-queue:clearing.outbound.queue}")
     private String clearingQueue;
 
+    @Value("${account.core.corporate.account-number:0000000000}")
+    private String fallbackCorporateAccount;
+
     public RoutingService(PaymentDetailRepository detailRepository,
                           MongoTemplate mongoTemplate,
                           AccountCoreRestClient accountCoreClient,
@@ -169,6 +172,7 @@ public class RoutingService {
         Update update = new Update()
                 .setOnInsert("batchId", message.getBatchId())
                 .setOnInsert("status", "PROCESSING")
+                .setOnInsert("originatingAccount", message.getOriginatingAccount())
                 .setOnInsert("declaredTotalRecords", message.getDeclaredTotalRecords())
                 .setOnInsert("successfulRecords", 0)
                 .setOnInsert("rejectedRecords", 0)
@@ -212,8 +216,13 @@ public class RoutingService {
                     .build();
             TariffResponse tariffResp = tariffClient.calculateTariff(tariffReq);
 
+            String debitAccount = (batch.getOriginatingAccount() != null && !batch.getOriginatingAccount().isBlank())
+                    ? batch.getOriginatingAccount()
+                    : fallbackCorporateAccount;
+
             accountCoreClient.corporateDebit(
                     batch.getBatchId(),
+                    debitAccount,
                     batch.getSuccessfulAmount(),
                     tariffResp.getTotalCharge()
             );
@@ -259,16 +268,4 @@ public class RoutingService {
         return d;
     }
 
-    // accountDestination is a string account number; proto expects int32 account_id.
-    // Takes the last 9 digits to stay within int range.
-    private int resolveAccountId(String accountDestination) {
-        try {
-            String trimmed = accountDestination.length() > 9
-                    ? accountDestination.substring(accountDestination.length() - 9)
-                    : accountDestination;
-            return Integer.parseInt(trimmed);
-        } catch (NumberFormatException e) {
-            return Math.abs(accountDestination.hashCode());
-        }
-    }
 }
