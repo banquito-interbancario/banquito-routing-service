@@ -1,14 +1,10 @@
 package ec.edu.espe.banquito.routingservice.service;
 
-import com.banquito.core.account.BatchCreditRequest;
-import com.banquito.core.account.BatchCreditResponse;
-import com.banquito.core.account.CorporateDebitRequest;
-import com.banquito.core.account.CreditInstruction;
 import com.banquito.payswitch.notification.NotificationRequest;
 import com.banquito.payswitch.tariff.TariffRequest;
 import com.banquito.payswitch.tariff.TariffResponse;
 import com.mongodb.client.result.UpdateResult;
-import ec.edu.espe.banquito.routingservice.client.AccountCoreGrpcClient;
+import ec.edu.espe.banquito.routingservice.client.AccountCoreRestClient;
 import ec.edu.espe.banquito.routingservice.client.NotificationGrpcClient;
 import ec.edu.espe.banquito.routingservice.client.TariffGrpcClient;
 import ec.edu.espe.banquito.routingservice.model.PaymentBatch;
@@ -46,7 +42,7 @@ public class RoutingService {
 
     private final PaymentDetailRepository detailRepository;
     private final MongoTemplate mongoTemplate;
-    private final AccountCoreGrpcClient accountCoreClient;
+    private final AccountCoreRestClient accountCoreClient;
     private final TariffGrpcClient tariffClient;
     private final NotificationGrpcClient notificationClient;
     private final RabbitTemplate rabbitTemplate;
@@ -56,7 +52,7 @@ public class RoutingService {
 
     public RoutingService(PaymentDetailRepository detailRepository,
                           MongoTemplate mongoTemplate,
-                          AccountCoreGrpcClient accountCoreClient,
+                          AccountCoreRestClient accountCoreClient,
                           TariffGrpcClient tariffClient,
                           NotificationGrpcClient notificationClient,
                           RabbitTemplate rabbitTemplate) {
@@ -132,25 +128,13 @@ public class RoutingService {
     }
 
     private void processOnUs(PaymentLineMessage message, String detailId) {
-        int accountId = resolveAccountId(message.getAccountDestination());
-
-        CreditInstruction instruction = CreditInstruction.newBuilder()
-                .setAccountId(accountId)
-                .setAmount(message.getAmount())
-                .setReference(message.getReference())
-                .setTransactionUuid(message.getTransactionUuid())
-                .build();
-
-        BatchCreditRequest request = BatchCreditRequest.newBuilder()
-                .setBatchId(message.getBatchId())
-                .addCredits(instruction)
-                .build();
-
-        BatchCreditResponse response = accountCoreClient.batchCredit(request);
-
-        if (response.getFailed() > 0) {
-            throw new RuntimeException("BatchCredit rejected account: " + message.getAccountDestination());
-        }
+        accountCoreClient.batchCredit(
+                message.getBatchId(),
+                message.getAccountDestination(),
+                message.getAmount(),
+                message.getReference(),
+                message.getTransactionUuid()
+        );
 
         // RF-03 / RF notification: fire-and-forget to Anthony
         sendNotificationAsync(message, detailId);
@@ -228,12 +212,11 @@ public class RoutingService {
                     .build();
             TariffResponse tariffResp = tariffClient.calculateTariff(tariffReq);
 
-            CorporateDebitRequest debitReq = CorporateDebitRequest.newBuilder()
-                    .setBatchId(batch.getBatchId())
-                    .setTotalAmount(batch.getSuccessfulAmount())
-                    .setCommissionAmount(tariffResp.getTotalCharge())
-                    .build();
-            accountCoreClient.corporateDebit(debitReq);
+            accountCoreClient.corporateDebit(
+                    batch.getBatchId(),
+                    batch.getSuccessfulAmount(),
+                    tariffResp.getTotalCharge()
+            );
 
             Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
             Update u = new Update().set("status", "COMPLETED").set("completedAt", LocalDateTime.now());
