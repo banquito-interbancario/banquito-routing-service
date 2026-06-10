@@ -37,7 +37,7 @@ public class RoutingService {
 
     private static final String ONUS_CODE = "001";
     private static final Set<String> VALID_OFFUS_CODES = Set.of(
-            "010", "017", "021", "023", "024", "025", "030", "034", "035", "036", "037", "041", "043"
+            "002", "003", "004", "005", "010", "017", "021", "023", "024", "025", "030", "034", "035", "036", "037", "041", "043"
     );
 
     private final PaymentDetailRepository detailRepository;
@@ -52,6 +52,9 @@ public class RoutingService {
 
     @Value("${account.core.corporate.account-number:0000000000}")
     private String fallbackCorporateAccount;
+
+    @Value("${app.routing.local-completion-enabled:false}")
+    private boolean localCompletionEnabled;
 
     public RoutingService(PaymentDetailRepository detailRepository,
                           MongoTemplate mongoTemplate,
@@ -210,6 +213,17 @@ public class RoutingService {
     private void completeBatch(PaymentBatch batch) {
         log.info("Completing batch: {}", batch.getBatchId());
         try {
+            if (localCompletionEnabled) {
+                Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
+                Update u = new Update()
+                        .set("status", "COMPLETED")
+                        .set("updatedAt", LocalDateTime.now())
+                        .set("completedAt", LocalDateTime.now());
+                mongoTemplate.updateFirst(q, u, PaymentBatch.class);
+                log.info("Batch COMPLETED in local mode: {}", batch.getBatchId());
+                return;
+            }
+
             TariffRequest tariffReq = TariffRequest.newBuilder()
                     .setSuccessfulTx(batch.getSuccessfulRecords())
                     .setBatchId(batch.getBatchId())
