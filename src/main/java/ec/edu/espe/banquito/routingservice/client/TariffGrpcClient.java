@@ -1,8 +1,8 @@
 package ec.edu.espe.banquito.routingservice.client;
 
-import com.banquito.payswitch.tariff.TariffRequest;
-import com.banquito.payswitch.tariff.TariffResponse;
-import com.banquito.payswitch.tariff.TariffServiceGrpc;
+import ec.edu.espe.banquito.banquitotariffservice.grpc.TariffCalculationGrpcRequest;
+import ec.edu.espe.banquito.banquitotariffservice.grpc.TariffCalculationGrpcResponse;
+import ec.edu.espe.banquito.banquitotariffservice.grpc.TariffGrpcServiceGrpc;
 import net.devh.boot.grpc.client.inject.GrpcClient;
 import org.springframework.stereotype.Component;
 import java.util.concurrent.TimeUnit;
@@ -11,9 +11,9 @@ import java.util.concurrent.TimeUnit;
 public class TariffGrpcClient {
 
     @GrpcClient("tariff")
-    private TariffServiceGrpc.TariffServiceBlockingStub blockingStub;
+    private TariffGrpcServiceGrpc.TariffGrpcServiceBlockingStub blockingStub;
 
-    public TariffResponse calculateTariff(TariffRequest request) {
+    public TariffCalculationGrpcResponse calculateTariff(TariffCalculationGrpcRequest request) {
         return blockingStub
                 .withDeadlineAfter(5, TimeUnit.SECONDS)
                 .calculateTariff(request);

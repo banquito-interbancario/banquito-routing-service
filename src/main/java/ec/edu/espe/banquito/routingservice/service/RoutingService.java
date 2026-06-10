@@ -1,8 +1,8 @@
 package ec.edu.espe.banquito.routingservice.service;
 
 import com.banquito.payswitch.notification.NotificationRequest;
-import com.banquito.payswitch.tariff.TariffRequest;
-import com.banquito.payswitch.tariff.TariffResponse;
+import ec.edu.espe.banquito.banquitotariffservice.grpc.TariffCalculationGrpcRequest;
+import ec.edu.espe.banquito.banquitotariffservice.grpc.TariffCalculationGrpcResponse;
 import com.mongodb.client.result.UpdateResult;
 import ec.edu.espe.banquito.routingservice.client.AccountCoreRestClient;
 import ec.edu.espe.banquito.routingservice.client.NotificationGrpcClient;
@@ -224,11 +224,11 @@ public class RoutingService {
                 return;
             }
 
-            TariffRequest tariffReq = TariffRequest.newBuilder()
+            TariffCalculationGrpcRequest tariffReq = TariffCalculationGrpcRequest.newBuilder()
                     .setSuccessfulTx(batch.getSuccessfulRecords())
                     .setBatchId(batch.getBatchId())
                     .build();
-            TariffResponse tariffResp = tariffClient.calculateTariff(tariffReq);
+            TariffCalculationGrpcResponse tariffResp = tariffClient.calculateTariff(tariffReq);
 
             String debitAccount = (batch.getOriginatingAccount() != null && !batch.getOriginatingAccount().isBlank())
                     ? batch.getOriginatingAccount()
@@ -238,7 +238,7 @@ public class RoutingService {
                     batch.getBatchId(),
                     debitAccount,
                     batch.getSuccessfulAmount(),
-                    tariffResp.getTotalCharge()
+                    Double.parseDouble(tariffResp.getTotalCharge())
             );
 
             Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
