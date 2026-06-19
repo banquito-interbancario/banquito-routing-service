@@ -47,4 +47,18 @@ public class AccountCoreRestClient {
 
         restTemplate.postForEntity(baseUrl + "/api/v2/payments/corporate-debit", body, Void.class);
     }
+
+    /**
+     * RF-03: Devuelve a la cuenta corporativa el monto de las líneas rechazadas.
+     * Se llama al final del batch si rejectedAmount > 0.
+     */
+    public void corporateRefund(String batchId, String accountNumber, double refundAmount) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("batchId", batchId);
+        body.put("accountNumber", accountNumber);
+        body.put("transactionUuid", UUID.randomUUID().toString());
+        body.put("refundAmount", refundAmount);
+
+        restTemplate.postForEntity(baseUrl + "/api/v2/payments/corporate-refund", body, Void.class);
+    }
 }

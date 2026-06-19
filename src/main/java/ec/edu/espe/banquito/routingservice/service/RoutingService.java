@@ -7,6 +7,7 @@ import com.mongodb.client.result.UpdateResult;
 import ec.edu.espe.banquito.routingservice.client.AccountCoreRestClient;
 import ec.edu.espe.banquito.routingservice.client.NotificationGrpcClient;
 import ec.edu.espe.banquito.routingservice.client.TariffGrpcClient;
+import ec.edu.espe.banquito.routingservice.model.OffUsClearingMessage;
 import ec.edu.espe.banquito.routingservice.model.PaymentBatch;
 import ec.edu.espe.banquito.routingservice.model.PaymentDetail;
 import ec.edu.espe.banquito.routingservice.model.PaymentLineMessage;
@@ -24,10 +25,12 @@ import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 @Service
@@ -35,10 +38,6 @@ public class RoutingService {
 
     private static final Logger log = LoggerFactory.getLogger(RoutingService.class);
 
-    private static final String ONUS_CODE = "001";
-    private static final Set<String> VALID_OFFUS_CODES = Set.of(
-            "002", "003", "004", "005", "010", "017", "021", "023", "024", "025", "030", "034", "035", "036", "037", "041", "043"
-    );
 
     private final PaymentDetailRepository detailRepository;
     private final MongoTemplate mongoTemplate;
@@ -87,8 +86,11 @@ public class RoutingService {
         // Ensure the batch document exists in MongoDB (upsert, safe for concurrency)
         ensureBatchExists(message);
 
-        // Evaluate routing code
-        String route = determineRoute(message.getRoutingCode());
+        // RF-03: Debitar el monto TOTAL declarado en el archivo al primer mensaje del lote
+        initialDebitIfNeeded(message);
+
+        // Evaluate routing code using the classification resolved by the parametric catalog
+        String route = determineRoute(message);
         boolean success = false;
         String errorCode = null;
         String errorMessage = null;
@@ -106,7 +108,8 @@ public class RoutingService {
             }
             case "OFFUS" -> {
                 try {
-                    rabbitTemplate.convertAndSend(clearingQueue, message);
+                    OffUsClearingMessage clearingMessage = adaptForClearingHouse(message);
+                    rabbitTemplate.convertAndSend(clearingQueue, clearingMessage);
                     success = true;
                 } catch (Exception e) {
                     log.error("Off-Us routing error batchId={} line={}: {}", message.getBatchId(), message.getLineNumber(), e.getMessage());
@@ -177,12 +180,52 @@ public class RoutingService {
                 .setOnInsert("status", "PROCESSING")
                 .setOnInsert("originatingAccount", message.getOriginatingAccount())
                 .setOnInsert("declaredTotalRecords", message.getDeclaredTotalRecords())
+                .setOnInsert("declaredTotalAmount", message.getDeclaredTotalAmount())
                 .setOnInsert("successfulRecords", 0)
                 .setOnInsert("rejectedRecords", 0)
                 .setOnInsert("successfulAmount", 0.0)
                 .setOnInsert("rejectedAmount", 0.0)
+                .setOnInsert("refundAmount", 0.0)
                 .setOnInsert("createdAt", LocalDateTime.now());
         mongoTemplate.upsert(query, update, PaymentBatch.class);
+    }
+
+    /**
+     * RF-03: Débito inicial del monto total declarado en el archivo.
+     * Usa una transición de estado atómica PROCESSING -> DEBITED para garantizar
+     * que solo UN worker realice el débito, aunque lleguen múltiples líneas en paralelo.
+     */
+    private void initialDebitIfNeeded(PaymentLineMessage message) {
+        // CAS atómico: solo el primer worker que gana esta actualización debita
+        Query claimQuery = new Query(
+                Criteria.where("batchId").is(message.getBatchId()).and("status").is("PROCESSING"));
+        Update claimUpdate = new Update().set("status", "DEBITED");
+        UpdateResult claimed = mongoTemplate.updateFirst(claimQuery, claimUpdate, PaymentBatch.class);
+
+        if (claimed.getModifiedCount() != 1) {
+            // Otro worker ya realizó el débito; nada que hacer
+            return;
+        }
+
+        double totalAmount = message.getDeclaredTotalAmount();
+        String debitAccount = (message.getOriginatingAccount() != null && !message.getOriginatingAccount().isBlank())
+                ? message.getOriginatingAccount()
+                : fallbackCorporateAccount;
+
+        log.info("[RF-03][DEBIT] Debitando monto total declarado={} de cuenta={} para batchId={}",
+                totalAmount, debitAccount, message.getBatchId());
+
+        try {
+            // Débito total inicial: totalAmount=monto declarado, commissionAmount=0 (la comisión se cobra al cerrar)
+            accountCoreClient.corporateDebit(message.getBatchId(), debitAccount, totalAmount, 0.0);
+            log.info("[RF-03][DEBIT] Débito inicial exitoso para batchId={}", message.getBatchId());
+        } catch (Exception e) {
+            // Si el débito falla (ej. fondos insuficientes), marcamos el batch como FAILED
+            log.error("[RF-03][DEBIT] Débito inicial fallido para batchId={}: {}", message.getBatchId(), e.getMessage());
+            Query failQuery = new Query(Criteria.where("batchId").is(message.getBatchId()));
+            Update failUpdate = new Update().set("status", "FAILED").set("updatedAt", LocalDateTime.now());
+            mongoTemplate.updateFirst(failQuery, failUpdate, PaymentBatch.class);
+        }
     }
 
     private void updateBatchCounters(PaymentLineMessage message, boolean success) {
@@ -209,21 +252,38 @@ public class RoutingService {
         }
     }
 
-    // RF-04: Tariff calculation + corporate debit when the batch is fully processed
+    // El estado final del lote refleja el resultado de las líneas (RF-02/RF-03), no
+    // los pasos administrativos posteriores (comisión, devolución): un lote con todas
+    // sus líneas acreditadas no debe pasar a FAILED solo porque el cobro de comisión falle.
+    private String resolveOutcomeStatus(PaymentBatch batch) {
+        if (batch.getSuccessfulRecords() <= 0) {
+            return "FAILED";
+        }
+        if (batch.getRejectedRecords() > 0) {
+            return "COMPLETED_WITH_ISSUES";
+        }
+        return "COMPLETED";
+    }
+
+    // RF-04: Comisión + devolución de rechazados cuando el lote está totalmente procesado
     private void completeBatch(PaymentBatch batch) {
         log.info("Completing batch: {}", batch.getBatchId());
-        try {
-            if (localCompletionEnabled) {
-                Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
-                Update u = new Update()
-                        .set("status", "COMPLETED")
-                        .set("updatedAt", LocalDateTime.now())
-                        .set("completedAt", LocalDateTime.now());
-                mongoTemplate.updateFirst(q, u, PaymentBatch.class);
-                log.info("Batch COMPLETED in local mode: {}", batch.getBatchId());
-                return;
-            }
+        String outcomeStatus = resolveOutcomeStatus(batch);
 
+        if (localCompletionEnabled) {
+            Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
+            Update u = new Update()
+                    .set("status", outcomeStatus)
+                    .set("updatedAt", LocalDateTime.now())
+                    .set("completedAt", LocalDateTime.now());
+            mongoTemplate.updateFirst(q, u, PaymentBatch.class);
+            log.info("Batch {} in local mode: {}", outcomeStatus, batch.getBatchId());
+            return;
+        }
+
+        double refund = batch.getRejectedAmount();
+        try {
+            // RF-04: Calcular comisión solo sobre transacciones exitosas
             TariffCalculationGrpcRequest tariffReq = TariffCalculationGrpcRequest.newBuilder()
                     .setSuccessfulTx(batch.getSuccessfulRecords())
                     .setBatchId(batch.getBatchId())
@@ -234,36 +294,78 @@ public class RoutingService {
                     ? batch.getOriginatingAccount()
                     : fallbackCorporateAccount;
 
-            accountCoreClient.corporateDebit(
-                    batch.getBatchId(),
-                    debitAccount,
-                    batch.getSuccessfulAmount(),
-                    Double.parseDouble(tariffResp.getTotalCharge())
-            );
+            // RF-03: El débito inicial ya se hizo por el monto total.
+            // Ahora solo registramos la comisión como débito adicional (si aplica).
+            double commission = Double.parseDouble(tariffResp.getTotalCharge());
+            if (commission > 0) {
+                log.info("[RF-04][COMMISSION] Debitando comisión={} de cuenta={} para batchId={}",
+                        commission, debitAccount, batch.getBatchId());
+                accountCoreClient.corporateDebit(batch.getBatchId(), debitAccount, 0.0, commission);
+            }
 
-            Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
-            Update u = new Update().set("status", "COMPLETED").set("completedAt", LocalDateTime.now());
-            mongoTemplate.updateFirst(q, u, PaymentBatch.class);
-
-            log.info("Batch COMPLETED: {}", batch.getBatchId());
+            // RF-03: Devolver el monto de líneas rechazadas a la cuenta corporativa
+            if (refund > 0) {
+                log.info("[RF-03][REFUND] Devolviendo monto rechazado={} a cuenta={} para batchId={}",
+                        refund, debitAccount, batch.getBatchId());
+                accountCoreClient.corporateRefund(batch.getBatchId(), debitAccount, refund);
+            }
         } catch (Exception e) {
-            log.error("Batch completion failed {}: {}", batch.getBatchId(), e.getMessage());
-            Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
-            Update u = new Update().set("status", "FAILED").set("updatedAt", LocalDateTime.now());
-            mongoTemplate.updateFirst(q, u, PaymentBatch.class);
+            // Falla en comisión/devolución: queda pendiente para revisión operativa,
+            // pero no debe ocultar que las líneas del lote sí se procesaron.
+            log.error("[RF-04] Cobro de comisión o devolución falló para batchId={} (lote permanece {}): {}",
+                    batch.getBatchId(), outcomeStatus, e.getMessage());
         }
+
+        Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
+        Update u = new Update()
+                .set("status", outcomeStatus)
+                .set("refundAmount", refund)
+                .set("completedAt", LocalDateTime.now());
+        mongoTemplate.updateFirst(q, u, PaymentBatch.class);
+
+        log.info("[RF-03] Batch {}: batchId={}, exitosas={}, rechazadas={}, devuelto={}",
+                outcomeStatus, batch.getBatchId(), batch.getSuccessfulRecords(), batch.getRejectedRecords(), refund);
     }
 
     private boolean tryClaimCompletion(String batchId) {
-        Query query = new Query(Criteria.where("batchId").is(batchId).and("status").is("PROCESSING"));
+        // El lote ya debería estar en estado DEBITED tras el pago inicial de la primera línea
+        Query query = new Query(Criteria.where("batchId").is(batchId).and("status").is("DEBITED"));
         Update update = new Update().set("status", "COMPLETING");
         UpdateResult result = mongoTemplate.updateFirst(query, update, PaymentBatch.class);
         return result.getModifiedCount() == 1;
     }
 
-    private String determineRoute(String routingCode) {
-        if (ONUS_CODE.equals(routingCode)) return "ONUS";
-        if (VALID_OFFUS_CODES.contains(routingCode)) return "OFFUS";
+    // RF-03: Adapta el registro interno al formato esperado por la Cámara de Compensación
+    // (clearinghouse-adapter) antes de publicarlo en la Cola de Salida.
+    private OffUsClearingMessage adaptForClearingHouse(PaymentLineMessage message) {
+        OffUsClearingMessage clearingMessage = new OffUsClearingMessage();
+        clearingMessage.setBatchId(UUID.fromString(message.getBatchId()));
+        clearingMessage.setTransactionId(resolveTransactionId(message.getTransactionUuid()));
+        clearingMessage.setRoutingCode(message.getRoutingCode());
+        clearingMessage.setOriginAccount(message.getOriginatingAccount());
+        clearingMessage.setDestinationAccount(message.getAccountDestination());
+        clearingMessage.setAmount(BigDecimal.valueOf(message.getAmount()));
+        clearingMessage.setCurrency("USD");
+        clearingMessage.setConcept(message.getReference());
+        clearingMessage.setValueDate(LocalDate.now());
+        return clearingMessage;
+    }
+
+    private UUID resolveTransactionId(String transactionUuid) {
+        if (transactionUuid == null || transactionUuid.isBlank()) {
+            return UUID.randomUUID();
+        }
+        try {
+            return UUID.fromString(transactionUuid);
+        } catch (IllegalArgumentException e) {
+            return UUID.randomUUID();
+        }
+    }
+
+    private String determineRoute(PaymentLineMessage message) {
+        String classification = message.getRoutingClassification();
+        if ("ON_US".equals(classification)) return "ONUS";
+        if ("OFF_US".equals(classification)) return "OFFUS";
         return "INVALID";
     }
 

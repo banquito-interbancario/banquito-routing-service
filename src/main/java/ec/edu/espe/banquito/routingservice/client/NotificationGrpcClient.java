@@ -9,10 +9,9 @@ import org.springframework.stereotype.Component;
 public class NotificationGrpcClient {
 
     @GrpcClient("notification")
-    private NotificationServiceGrpc.NotificationServiceFutureStub futureStub;
+    private NotificationServiceGrpc.NotificationServiceBlockingStub blockingStub;
 
-    // Fire-and-forget: returns immediately without waiting for the response
     public void sendNotification(NotificationRequest request) {
-        futureStub.sendNotification(request);
+        blockingStub.sendNotification(request);
     }
 }

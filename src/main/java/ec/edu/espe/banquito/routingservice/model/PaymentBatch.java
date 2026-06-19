@@ -5,7 +5,7 @@ import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 import java.time.LocalDateTime;
 
-@Document(collection = "payment_batch")
+@Document(collection = "routing_payment_batch")
 public class PaymentBatch {
 
     @Id
@@ -14,7 +14,7 @@ public class PaymentBatch {
     @Indexed(unique = true)
     private String batchId;
 
-    private String status; // PROCESSING, COMPLETING, COMPLETED, FAILED
+    private String status; // PROCESSING, DEBITED, COMPLETING, COMPLETED, FAILED
 
     private String originatingAccount;
 
@@ -23,6 +23,8 @@ public class PaymentBatch {
     private int rejectedRecords;
     private double successfulAmount;
     private double rejectedAmount;
+    private double declaredTotalAmount;  // monto total debitado al inicio (del header del archivo)
+    private double refundAmount;         // monto devuelto al final (= rejectedAmount)
 
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
@@ -51,6 +53,12 @@ public class PaymentBatch {
 
     public double getRejectedAmount() { return rejectedAmount; }
     public void setRejectedAmount(double rejectedAmount) { this.rejectedAmount = rejectedAmount; }
+
+    public double getDeclaredTotalAmount() { return declaredTotalAmount; }
+    public void setDeclaredTotalAmount(double declaredTotalAmount) { this.declaredTotalAmount = declaredTotalAmount; }
+
+    public double getRefundAmount() { return refundAmount; }
+    public void setRefundAmount(double refundAmount) { this.refundAmount = refundAmount; }
 
     public String getOriginatingAccount() { return originatingAccount; }
     public void setOriginatingAccount(String originatingAccount) { this.originatingAccount = originatingAccount; }

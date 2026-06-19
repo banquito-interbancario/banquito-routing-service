@@ -5,7 +5,7 @@ import org.springframework.data.mongodb.core.index.CompoundIndex;
 import org.springframework.data.mongodb.core.mapping.Document;
 import java.time.LocalDateTime;
 
-@Document(collection = "payment_detail")
+@Document(collection = "routing_payment_detail")
 @CompoundIndex(name = "batch_line_unique", def = "{'batchId': 1, 'lineNumber': 1}", unique = true)
 public class PaymentDetail {
 

@@ -37,6 +37,14 @@ public class PaymentLineMessage {
     @JsonProperty("originating_account")
     private String originatingAccount;
 
+    // Monto total declarado en la cabecera del archivo (para débito inicial)
+    @JsonProperty("declared_total_amount")
+    private double declaredTotalAmount;
+
+    // ON_US = local (BanQuito), OFF_US = externa. Viene del catálogo paramétrico del file-reception-service.
+    @JsonProperty("routing_classification")
+    private String routingClassification;
+
     public String getBatchId() { return batchId; }
     public void setBatchId(String batchId) { this.batchId = batchId; }
 
@@ -69,4 +77,10 @@ public class PaymentLineMessage {
 
     public String getOriginatingAccount() { return originatingAccount; }
     public void setOriginatingAccount(String originatingAccount) { this.originatingAccount = originatingAccount; }
+
+    public double getDeclaredTotalAmount() { return declaredTotalAmount; }
+    public void setDeclaredTotalAmount(double declaredTotalAmount) { this.declaredTotalAmount = declaredTotalAmount; }
+
+    public String getRoutingClassification() { return routingClassification; }
+    public void setRoutingClassification(String routingClassification) { this.routingClassification = routingClassification; }
 }
