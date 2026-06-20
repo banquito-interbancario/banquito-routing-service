@@ -55,9 +55,6 @@ public class RoutingService {
     @Value("${app.routing.local-completion-enabled:false}")
     private boolean localCompletionEnabled;
 
-    // Sincroniza a los workers concurrentes del mismo batch con el resultado real
-    // del débito inicial: solo el primero lo ejecuta, los demás esperan su resultado
-    // en vez de asumir éxito y acreditar dinero que nunca se debitó.
     private final java.util.concurrent.ConcurrentHashMap<String, CompletableFuture<Boolean>> debitOutcomes =
             new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -92,9 +89,6 @@ public class RoutingService {
         // Ensure the batch document exists in MongoDB (upsert, safe for concurrency)
         ensureBatchExists(message);
 
-        // RF-03: Debitar el monto TOTAL declarado en el archivo al primer mensaje del lote.
-        // Todos los workers del batch esperan el resultado real antes de acreditar nada:
-        // si el débito falla (ej. fondos insuficientes), ninguna línea debe procesarse.
         if (!initialDebitIfNeeded(message)) {
             detail.setStatus("REJECTED");
             detail.setErrorCode("BATCH_DEBIT_FAILED");
@@ -206,28 +200,15 @@ public class RoutingService {
         mongoTemplate.upsert(query, update, PaymentBatch.class);
     }
 
-    /**
-     * RF-03: Débito inicial del monto total declarado en el archivo.
-     * Usa una transición de estado atómica PROCESSING -> DEBITED para garantizar
-     * que solo UN worker realice el débito, aunque lleguen múltiples líneas en paralelo.
-     * Los demás workers del mismo batch ESPERAN el resultado real (vía CompletableFuture)
-     * antes de decidir si acreditan su línea: si no se espera, una línea puede acreditarse
-     * antes de que el worker ganador termine de confirmar que el débito falló, generando
-     * dinero acreditado sin haber sido debitado nunca (bug detectado en pruebas).
-     *
-     * @return true si el débito inicial fue exitoso (o ya lo había sido); false si falló.
-     */
     private boolean initialDebitIfNeeded(PaymentLineMessage message) {
         String batchId = message.getBatchId();
         CompletableFuture<Boolean> outcome = debitOutcomes.computeIfAbsent(batchId, id -> new CompletableFuture<>());
 
-        // CAS atómico: solo el primer worker que gana esta actualización debita
         Query claimQuery = new Query(Criteria.where("batchId").is(batchId).and("status").is("PROCESSING"));
         Update claimUpdate = new Update().set("status", "DEBITED");
         UpdateResult claimed = mongoTemplate.updateFirst(claimQuery, claimUpdate, PaymentBatch.class);
 
         if (claimed.getModifiedCount() != 1) {
-            // Otro worker ya está debitando (o ya terminó): esperar su resultado real
             try {
                 return outcome.get(20, java.util.concurrent.TimeUnit.SECONDS);
             } catch (Exception e) {
@@ -249,13 +230,10 @@ public class RoutingService {
 
         boolean success;
         try {
-            // Débito total inicial: totalAmount=monto declarado, commissionAmount=0 (la comisión se cobra al cerrar)
             accountCoreClient.corporateDebit(batchId, debitAccount, totalAmount, 0.0);
             log.info("[RF-03][DEBIT] Débito inicial exitoso para batchId={}", batchId);
             success = true;
         } catch (Exception e) {
-            // Si el débito falla (ej. fondos insuficientes), marcamos el batch como FAILED
-            // con el motivo real, para que ninguna línea se acredite y el frontend pueda mostrarlo.
             log.error("[RF-03][DEBIT] Débito inicial fallido para batchId={}: {}", batchId, e.getMessage());
             Query failQuery = new Query(Criteria.where("batchId").is(batchId));
             Update failUpdate = new Update()

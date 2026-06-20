@@ -25,7 +25,7 @@ public class PaymentBatch {
     private double rejectedAmount;
     private double declaredTotalAmount;  // monto total debitado al inicio (del header del archivo)
     private double refundAmount;         // monto devuelto al final (= rejectedAmount)
-    private String failureReason;        // motivo si el débito inicial falló (ej. fondos insuficientes)
+    private String failureReason;
 
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
