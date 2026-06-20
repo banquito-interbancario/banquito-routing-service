@@ -55,6 +55,12 @@ public class RoutingService {
     @Value("${app.routing.local-completion-enabled:false}")
     private boolean localCompletionEnabled;
 
+    // Sincroniza a los workers concurrentes del mismo batch con el resultado real
+    // del débito inicial: solo el primero lo ejecuta, los demás esperan su resultado
+    // en vez de asumir éxito y acreditar dinero que nunca se debitó.
+    private final java.util.concurrent.ConcurrentHashMap<String, CompletableFuture<Boolean>> debitOutcomes =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     public RoutingService(PaymentDetailRepository detailRepository,
                           MongoTemplate mongoTemplate,
                           AccountCoreRestClient accountCoreClient,
@@ -86,8 +92,18 @@ public class RoutingService {
         // Ensure the batch document exists in MongoDB (upsert, safe for concurrency)
         ensureBatchExists(message);
 
-        // RF-03: Debitar el monto TOTAL declarado en el archivo al primer mensaje del lote
-        initialDebitIfNeeded(message);
+        // RF-03: Debitar el monto TOTAL declarado en el archivo al primer mensaje del lote.
+        // Todos los workers del batch esperan el resultado real antes de acreditar nada:
+        // si el débito falla (ej. fondos insuficientes), ninguna línea debe procesarse.
+        if (!initialDebitIfNeeded(message)) {
+            detail.setStatus("REJECTED");
+            detail.setErrorCode("BATCH_DEBIT_FAILED");
+            detail.setErrorMessage("No se acreditó: falló el débito inicial del monto total del lote (fondos insuficientes u otro error en la cuenta de origen).");
+            detail.setProcessedAt(LocalDateTime.now());
+            detailRepository.save(detail);
+            updateBatchCounters(message, false);
+            return;
+        }
 
         // Evaluate routing code using the classification resolved by the parametric catalog
         String route = determineRoute(message);
@@ -194,17 +210,33 @@ public class RoutingService {
      * RF-03: Débito inicial del monto total declarado en el archivo.
      * Usa una transición de estado atómica PROCESSING -> DEBITED para garantizar
      * que solo UN worker realice el débito, aunque lleguen múltiples líneas en paralelo.
+     * Los demás workers del mismo batch ESPERAN el resultado real (vía CompletableFuture)
+     * antes de decidir si acreditan su línea: si no se espera, una línea puede acreditarse
+     * antes de que el worker ganador termine de confirmar que el débito falló, generando
+     * dinero acreditado sin haber sido debitado nunca (bug detectado en pruebas).
+     *
+     * @return true si el débito inicial fue exitoso (o ya lo había sido); false si falló.
      */
-    private void initialDebitIfNeeded(PaymentLineMessage message) {
+    private boolean initialDebitIfNeeded(PaymentLineMessage message) {
+        String batchId = message.getBatchId();
+        CompletableFuture<Boolean> outcome = debitOutcomes.computeIfAbsent(batchId, id -> new CompletableFuture<>());
+
         // CAS atómico: solo el primer worker que gana esta actualización debita
-        Query claimQuery = new Query(
-                Criteria.where("batchId").is(message.getBatchId()).and("status").is("PROCESSING"));
+        Query claimQuery = new Query(Criteria.where("batchId").is(batchId).and("status").is("PROCESSING"));
         Update claimUpdate = new Update().set("status", "DEBITED");
         UpdateResult claimed = mongoTemplate.updateFirst(claimQuery, claimUpdate, PaymentBatch.class);
 
         if (claimed.getModifiedCount() != 1) {
-            // Otro worker ya realizó el débito; nada que hacer
-            return;
+            // Otro worker ya está debitando (o ya terminó): esperar su resultado real
+            try {
+                return outcome.get(20, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (Exception e) {
+                log.warn("[RF-03][DEBIT] No se pudo confirmar a tiempo el resultado del débito para batchId={}: {}",
+                        batchId, e.getMessage());
+                PaymentBatch current = mongoTemplate.findOne(
+                        new Query(Criteria.where("batchId").is(batchId)), PaymentBatch.class);
+                return current != null && !"FAILED".equals(current.getStatus());
+            }
         }
 
         double totalAmount = message.getDeclaredTotalAmount();
@@ -213,19 +245,29 @@ public class RoutingService {
                 : fallbackCorporateAccount;
 
         log.info("[RF-03][DEBIT] Debitando monto total declarado={} de cuenta={} para batchId={}",
-                totalAmount, debitAccount, message.getBatchId());
+                totalAmount, debitAccount, batchId);
 
+        boolean success;
         try {
             // Débito total inicial: totalAmount=monto declarado, commissionAmount=0 (la comisión se cobra al cerrar)
-            accountCoreClient.corporateDebit(message.getBatchId(), debitAccount, totalAmount, 0.0);
-            log.info("[RF-03][DEBIT] Débito inicial exitoso para batchId={}", message.getBatchId());
+            accountCoreClient.corporateDebit(batchId, debitAccount, totalAmount, 0.0);
+            log.info("[RF-03][DEBIT] Débito inicial exitoso para batchId={}", batchId);
+            success = true;
         } catch (Exception e) {
             // Si el débito falla (ej. fondos insuficientes), marcamos el batch como FAILED
-            log.error("[RF-03][DEBIT] Débito inicial fallido para batchId={}: {}", message.getBatchId(), e.getMessage());
-            Query failQuery = new Query(Criteria.where("batchId").is(message.getBatchId()));
-            Update failUpdate = new Update().set("status", "FAILED").set("updatedAt", LocalDateTime.now());
+            // con el motivo real, para que ninguna línea se acredite y el frontend pueda mostrarlo.
+            log.error("[RF-03][DEBIT] Débito inicial fallido para batchId={}: {}", batchId, e.getMessage());
+            Query failQuery = new Query(Criteria.where("batchId").is(batchId));
+            Update failUpdate = new Update()
+                    .set("status", "FAILED")
+                    .set("failureReason", e.getMessage())
+                    .set("updatedAt", LocalDateTime.now());
             mongoTemplate.updateFirst(failQuery, failUpdate, PaymentBatch.class);
+            success = false;
         }
+
+        outcome.complete(success);
+        return success;
     }
 
     private void updateBatchCounters(PaymentLineMessage message, boolean success) {

@@ -14,6 +14,7 @@ public class BatchStatusResponse {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     private LocalDateTime completedAt;
+    private String failureReason;
 
     public String getBatchId() { return batchId; }
     public void setBatchId(String batchId) { this.batchId = batchId; }
@@ -44,4 +45,7 @@ public class BatchStatusResponse {
 
     public LocalDateTime getCompletedAt() { return completedAt; }
     public void setCompletedAt(LocalDateTime completedAt) { this.completedAt = completedAt; }
+
+    public String getFailureReason() { return failureReason; }
+    public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
 }

@@ -40,6 +40,7 @@ public class RoutingController {
         r.setCreatedAt(batch.getCreatedAt());
         r.setUpdatedAt(batch.getUpdatedAt());
         r.setCompletedAt(batch.getCompletedAt());
+        r.setFailureReason(batch.getFailureReason());
         return r;
     }
 }
