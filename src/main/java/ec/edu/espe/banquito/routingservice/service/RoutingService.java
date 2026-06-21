@@ -28,6 +28,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -37,6 +38,7 @@ import java.util.concurrent.CompletableFuture;
 public class RoutingService {
 
     private static final Logger log = LoggerFactory.getLogger(RoutingService.class);
+    private static final ZoneId SERVICE_ZONE = ZoneId.of("America/Guayaquil");
 
     private static final String FIELD_BATCH_ID = "batchId";
     private static final String FIELD_STATUS = "status";
@@ -102,7 +104,7 @@ public class RoutingService {
             detail.setStatus("REJECTED");
             detail.setErrorCode("BATCH_DEBIT_FAILED");
             detail.setErrorMessage("No se acreditó: falló el débito inicial del monto total del lote (fondos insuficientes u otro error en la cuenta de origen).");
-            detail.setProcessedAt(LocalDateTime.now());
+            detail.setProcessedAt(LocalDateTime.now(SERVICE_ZONE));
             detailRepository.save(detail);
             updateBatchCounters(message, false);
             return;
@@ -149,7 +151,7 @@ public class RoutingService {
         detail.setStatus(finalStatus);
         detail.setErrorCode(errorCode);
         detail.setErrorMessage(errorMessage);
-        detail.setProcessedAt(LocalDateTime.now());
+        detail.setProcessedAt(LocalDateTime.now(SERVICE_ZONE));
         detailRepository.save(detail);
 
         // Atomically update batch counters and check for completion
@@ -206,7 +208,7 @@ public class RoutingService {
                 .setOnInsert("successfulAmount", 0.0)
                 .setOnInsert("rejectedAmount", 0.0)
                 .setOnInsert("refundAmount", 0.0)
-                .setOnInsert("createdAt", LocalDateTime.now());
+                .setOnInsert("createdAt", LocalDateTime.now(SERVICE_ZONE));
         mongoTemplate.upsert(query, update, PaymentBatch.class);
     }
 
@@ -253,7 +255,7 @@ public class RoutingService {
             Update failUpdate = new Update()
                     .set(FIELD_STATUS, STATUS_FAILED)
                     .set("failureReason", e.getMessage())
-                    .set(FIELD_UPDATED_AT, LocalDateTime.now());
+                    .set(FIELD_UPDATED_AT, LocalDateTime.now(SERVICE_ZONE));
             mongoTemplate.updateFirst(failQuery, failUpdate, PaymentBatch.class);
             success = false;
         }
@@ -264,7 +266,7 @@ public class RoutingService {
 
     private void updateBatchCounters(PaymentLineMessage message, boolean success) {
         Query query = new Query(Criteria.where(FIELD_BATCH_ID).is(message.getBatchId()));
-        Update update = new Update().set(FIELD_UPDATED_AT, LocalDateTime.now());
+        Update update = new Update().set(FIELD_UPDATED_AT, LocalDateTime.now(SERVICE_ZONE));
 
         if (success) {
             update.inc("successfulRecords", 1).inc("successfulAmount", message.getAmount());
@@ -305,8 +307,8 @@ public class RoutingService {
             Query q = new Query(Criteria.where(FIELD_BATCH_ID).is(batch.getBatchId()));
             Update u = new Update()
                     .set(FIELD_STATUS, outcomeStatus)
-                    .set(FIELD_UPDATED_AT, LocalDateTime.now())
-                    .set("completedAt", LocalDateTime.now());
+                    .set(FIELD_UPDATED_AT, LocalDateTime.now(SERVICE_ZONE))
+                    .set("completedAt", LocalDateTime.now(SERVICE_ZONE));
             mongoTemplate.updateFirst(q, u, PaymentBatch.class);
             log.info("Batch {} in local mode: {}", outcomeStatus, batch.getBatchId());
             return;
@@ -351,7 +353,7 @@ public class RoutingService {
         Update u = new Update()
                 .set(FIELD_STATUS, outcomeStatus)
                 .set("refundAmount", refund)
-                .set("completedAt", LocalDateTime.now());
+                .set("completedAt", LocalDateTime.now(SERVICE_ZONE));
         mongoTemplate.updateFirst(q, u, PaymentBatch.class);
 
         log.info("[RF-03] Batch {}: batchId={}, exitosas={}, rechazadas={}, devuelto={}",
@@ -378,7 +380,7 @@ public class RoutingService {
         clearingMessage.setAmount(BigDecimal.valueOf(message.getAmount()));
         clearingMessage.setCurrency("USD");
         clearingMessage.setConcept(message.getReference());
-        clearingMessage.setValueDate(LocalDate.now());
+        clearingMessage.setValueDate(LocalDate.now(SERVICE_ZONE));
         return clearingMessage;
     }
 
