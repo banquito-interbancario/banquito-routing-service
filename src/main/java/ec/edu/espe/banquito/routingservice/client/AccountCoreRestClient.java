@@ -11,6 +11,10 @@ import java.util.UUID;
 @Component
 public class AccountCoreRestClient {
 
+    private static final String FIELD_BATCH_ID = "batchId";
+    private static final String FIELD_ACCOUNT_NUMBER = "accountNumber";
+    private static final String FIELD_TRANSACTION_UUID = "transactionUuid";
+
     private final RestTemplate restTemplate = new RestTemplate();
 
     @Value("${CORE_GATEWAY_URL:http://account-core-service:8081}")
@@ -24,13 +28,13 @@ public class AccountCoreRestClient {
                 : UUID.randomUUID().toString();
 
         Map<String, Object> credit = new HashMap<>();
-        credit.put("accountNumber", accountDestination);
+        credit.put(FIELD_ACCOUNT_NUMBER, accountDestination);
         credit.put("amount", amount);
         credit.put("reference", reference);
-        credit.put("transactionUuid", txUuid);
+        credit.put(FIELD_TRANSACTION_UUID, txUuid);
 
         Map<String, Object> body = new HashMap<>();
-        body.put("batchId", batchId);
+        body.put(FIELD_BATCH_ID, batchId);
         body.put("credits", List.of(credit));
 
         restTemplate.postForEntity(baseUrl + "/api/v2/payments/batch-credit", body, Void.class);
@@ -39,9 +43,9 @@ public class AccountCoreRestClient {
     public void corporateDebit(String batchId, String accountNumber,
                                double totalAmount, double commissionAmount) {
         Map<String, Object> body = new HashMap<>();
-        body.put("batchId", batchId);
-        body.put("accountNumber", accountNumber);
-        body.put("transactionUuid", UUID.randomUUID().toString());
+        body.put(FIELD_BATCH_ID, batchId);
+        body.put(FIELD_ACCOUNT_NUMBER, accountNumber);
+        body.put(FIELD_TRANSACTION_UUID, UUID.randomUUID().toString());
         body.put("totalAmount", totalAmount);
         body.put("commissionAmount", commissionAmount);
 
@@ -54,9 +58,9 @@ public class AccountCoreRestClient {
      */
     public void corporateRefund(String batchId, String accountNumber, double refundAmount) {
         Map<String, Object> body = new HashMap<>();
-        body.put("batchId", batchId);
-        body.put("accountNumber", accountNumber);
-        body.put("transactionUuid", UUID.randomUUID().toString());
+        body.put(FIELD_BATCH_ID, batchId);
+        body.put(FIELD_ACCOUNT_NUMBER, accountNumber);
+        body.put(FIELD_TRANSACTION_UUID, UUID.randomUUID().toString());
         body.put("refundAmount", refundAmount);
 
         restTemplate.postForEntity(baseUrl + "/api/v2/payments/corporate-refund", body, Void.class);

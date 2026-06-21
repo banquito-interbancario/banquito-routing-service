@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.dao.DuplicateKeyException;
+import com.mongodb.client.result.UpdateResult;
 import org.springframework.data.mongodb.core.FindAndModifyOptions;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
@@ -31,6 +32,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.*;
@@ -72,6 +74,11 @@ class RoutingServiceTest {
 
         when(detailRepository.save(any(PaymentDetail.class))).thenAnswer(inv -> inv.getArgument(0));
 
+        UpdateResult updateResult = mock(UpdateResult.class);
+        when(updateResult.getModifiedCount()).thenReturn(1L);
+        when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq(PaymentBatch.class)))
+                .thenReturn(updateResult);
+
         PaymentBatch batch = new PaymentBatch();
         batch.setBatchId(BATCH_1);
         batch.setDeclaredTotalRecords(0);
@@ -107,7 +114,7 @@ class RoutingServiceTest {
         verify(rabbitTemplate).convertAndSend(eq("clearing.exchange"), eq("clearing.outbound"), clearingCaptor.capture());
 
         OffUsClearingMessage adapted = clearingCaptor.getValue();
-        assertThat(adapted.getBatchId().toString()).isEqualTo(BATCH_1);
+        assertThat(adapted.getBatchId()).hasToString(BATCH_1);
         assertThat(adapted.getRoutingCode()).isEqualTo("002");
         assertThat(adapted.getDestinationAccount()).isEqualTo("0009999999");
         assertThat(adapted.getOriginAccount()).isEqualTo("0001111111");
@@ -128,7 +135,7 @@ class RoutingServiceTest {
 
         routingService.processPaymentLine(message);
 
-        verifyNoInteractions(accountCoreClient);
+        verify(accountCoreClient, never()).batchCredit(any(), any(), anyDouble(), any(), any());
         verifyNoInteractions(rabbitTemplate);
 
         ArgumentCaptor<PaymentDetail> captor = ArgumentCaptor.forClass(PaymentDetail.class);

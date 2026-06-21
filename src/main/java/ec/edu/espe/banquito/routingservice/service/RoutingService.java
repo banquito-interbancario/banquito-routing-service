@@ -38,6 +38,12 @@ public class RoutingService {
 
     private static final Logger log = LoggerFactory.getLogger(RoutingService.class);
 
+    private static final String FIELD_BATCH_ID = "batchId";
+    private static final String FIELD_STATUS = "status";
+    private static final String FIELD_UPDATED_AT = "updatedAt";
+    private static final String STATUS_PROCESSING = "PROCESSING";
+    private static final String STATUS_FAILED = "FAILED";
+    private static final String ROUTE_OFFUS = "OFFUS";
 
     private final PaymentDetailRepository detailRepository;
     private final MongoTemplate mongoTemplate;
@@ -119,7 +125,7 @@ public class RoutingService {
                     errorMessage = e.getMessage();
                 }
             }
-            case "OFFUS" -> {
+            case ROUTE_OFFUS -> {
                 try {
                     OffUsClearingMessage clearingMessage = adaptForClearingHouse(message);
                     rabbitTemplate.convertAndSend(clearingExchange, clearingRoutingKey, clearingMessage);
@@ -138,7 +144,8 @@ public class RoutingService {
         }
 
         // Update the detail with its final status
-        String finalStatus = success ? (route.equals("OFFUS") ? "CLEARED" : "PROCESSED") : "REJECTED";
+        String successStatus = route.equals(ROUTE_OFFUS) ? "CLEARED" : "PROCESSED";
+        String finalStatus = success ? successStatus : "REJECTED";
         detail.setStatus(finalStatus);
         detail.setErrorCode(errorCode);
         detail.setErrorMessage(errorMessage);
@@ -169,10 +176,10 @@ public class RoutingService {
                 vars.put("beneficiaryName", message.getBeneficiaryName());
                 vars.put("amount", String.format("%.2f", message.getAmount()));
                 vars.put("reference", message.getReference());
-                vars.put("batchId", message.getBatchId());
+                vars.put(FIELD_BATCH_ID, message.getBatchId());
 
                 NotificationRequest req = NotificationRequest.newBuilder()
-                        .setPaymentDetailId(detailId != null ? Math.abs(detailId.hashCode()) : 0)
+                        .setPaymentDetailId(detailId != null ? detailId.hashCode() : 0)
                         .setEmailTo(message.getBeneficiaryEmail())
                         .setSubject("Transferencia procesada exitosamente")
                         .setBodyTemplate("payment_credit_notification")
@@ -187,10 +194,10 @@ public class RoutingService {
     }
 
     private void ensureBatchExists(PaymentLineMessage message) {
-        Query query = new Query(Criteria.where("batchId").is(message.getBatchId()));
+        Query query = new Query(Criteria.where(FIELD_BATCH_ID).is(message.getBatchId()));
         Update update = new Update()
-                .setOnInsert("batchId", message.getBatchId())
-                .setOnInsert("status", "PROCESSING")
+                .setOnInsert(FIELD_BATCH_ID, message.getBatchId())
+                .setOnInsert(FIELD_STATUS, STATUS_PROCESSING)
                 .setOnInsert("originatingAccount", message.getOriginatingAccount())
                 .setOnInsert("declaredTotalRecords", message.getDeclaredTotalRecords())
                 .setOnInsert("declaredTotalAmount", message.getDeclaredTotalAmount())
@@ -207,19 +214,23 @@ public class RoutingService {
         String batchId = message.getBatchId();
         CompletableFuture<Boolean> outcome = debitOutcomes.computeIfAbsent(batchId, id -> new CompletableFuture<>());
 
-        Query claimQuery = new Query(Criteria.where("batchId").is(batchId).and("status").is("PROCESSING"));
-        Update claimUpdate = new Update().set("status", "DEBITED");
+        Query claimQuery = new Query(Criteria.where(FIELD_BATCH_ID).is(batchId).and(FIELD_STATUS).is(STATUS_PROCESSING));
+        Update claimUpdate = new Update().set(FIELD_STATUS, "DEBITED");
         UpdateResult claimed = mongoTemplate.updateFirst(claimQuery, claimUpdate, PaymentBatch.class);
 
         if (claimed.getModifiedCount() != 1) {
             try {
                 return outcome.get(20, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.warn("[RF-03][DEBIT] Interrupted waiting for debit result batchId={}", batchId);
+                return false;
             } catch (Exception e) {
                 log.warn("[RF-03][DEBIT] No se pudo confirmar a tiempo el resultado del débito para batchId={}: {}",
                         batchId, e.getMessage());
                 PaymentBatch current = mongoTemplate.findOne(
-                        new Query(Criteria.where("batchId").is(batchId)), PaymentBatch.class);
-                return current != null && !"FAILED".equals(current.getStatus());
+                        new Query(Criteria.where(FIELD_BATCH_ID).is(batchId)), PaymentBatch.class);
+                return current != null && !STATUS_FAILED.equals(current.getStatus());
             }
         }
 
@@ -238,11 +249,11 @@ public class RoutingService {
             success = true;
         } catch (Exception e) {
             log.error("[RF-03][DEBIT] Débito inicial fallido para batchId={}: {}", batchId, e.getMessage());
-            Query failQuery = new Query(Criteria.where("batchId").is(batchId));
+            Query failQuery = new Query(Criteria.where(FIELD_BATCH_ID).is(batchId));
             Update failUpdate = new Update()
-                    .set("status", "FAILED")
+                    .set(FIELD_STATUS, STATUS_FAILED)
                     .set("failureReason", e.getMessage())
-                    .set("updatedAt", LocalDateTime.now());
+                    .set(FIELD_UPDATED_AT, LocalDateTime.now());
             mongoTemplate.updateFirst(failQuery, failUpdate, PaymentBatch.class);
             success = false;
         }
@@ -252,8 +263,8 @@ public class RoutingService {
     }
 
     private void updateBatchCounters(PaymentLineMessage message, boolean success) {
-        Query query = new Query(Criteria.where("batchId").is(message.getBatchId()));
-        Update update = new Update().set("updatedAt", LocalDateTime.now());
+        Query query = new Query(Criteria.where(FIELD_BATCH_ID).is(message.getBatchId()));
+        Update update = new Update().set(FIELD_UPDATED_AT, LocalDateTime.now());
 
         if (success) {
             update.inc("successfulRecords", 1).inc("successfulAmount", message.getAmount());
@@ -266,11 +277,8 @@ public class RoutingService {
 
         if (updated != null && updated.getDeclaredTotalRecords() > 0) {
             int processed = updated.getSuccessfulRecords() + updated.getRejectedRecords();
-            if (processed >= updated.getDeclaredTotalRecords()) {
-                // Atomic CAS: only the worker that wins this update triggers completion
-                if (tryClaimCompletion(updated.getBatchId())) {
-                    completeBatch(updated);
-                }
+            if (processed >= updated.getDeclaredTotalRecords() && tryClaimCompletion(updated.getBatchId())) {
+                completeBatch(updated);
             }
         }
     }
@@ -280,7 +288,7 @@ public class RoutingService {
     // sus líneas acreditadas no debe pasar a FAILED solo porque el cobro de comisión falle.
     private String resolveOutcomeStatus(PaymentBatch batch) {
         if (batch.getSuccessfulRecords() <= 0) {
-            return "FAILED";
+            return STATUS_FAILED;
         }
         if (batch.getRejectedRecords() > 0) {
             return "COMPLETED_WITH_ISSUES";
@@ -294,10 +302,10 @@ public class RoutingService {
         String outcomeStatus = resolveOutcomeStatus(batch);
 
         if (localCompletionEnabled) {
-            Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
+            Query q = new Query(Criteria.where(FIELD_BATCH_ID).is(batch.getBatchId()));
             Update u = new Update()
-                    .set("status", outcomeStatus)
-                    .set("updatedAt", LocalDateTime.now())
+                    .set(FIELD_STATUS, outcomeStatus)
+                    .set(FIELD_UPDATED_AT, LocalDateTime.now())
                     .set("completedAt", LocalDateTime.now());
             mongoTemplate.updateFirst(q, u, PaymentBatch.class);
             log.info("Batch {} in local mode: {}", outcomeStatus, batch.getBatchId());
@@ -339,9 +347,9 @@ public class RoutingService {
                     batch.getBatchId(), outcomeStatus, e.getMessage());
         }
 
-        Query q = new Query(Criteria.where("batchId").is(batch.getBatchId()));
+        Query q = new Query(Criteria.where(FIELD_BATCH_ID).is(batch.getBatchId()));
         Update u = new Update()
-                .set("status", outcomeStatus)
+                .set(FIELD_STATUS, outcomeStatus)
                 .set("refundAmount", refund)
                 .set("completedAt", LocalDateTime.now());
         mongoTemplate.updateFirst(q, u, PaymentBatch.class);
@@ -352,8 +360,8 @@ public class RoutingService {
 
     private boolean tryClaimCompletion(String batchId) {
         // El lote ya debería estar en estado DEBITED tras el pago inicial de la primera línea
-        Query query = new Query(Criteria.where("batchId").is(batchId).and("status").is("DEBITED"));
-        Update update = new Update().set("status", "COMPLETING");
+        Query query = new Query(Criteria.where(FIELD_BATCH_ID).is(batchId).and(FIELD_STATUS).is("DEBITED"));
+        Update update = new Update().set(FIELD_STATUS, "COMPLETING");
         UpdateResult result = mongoTemplate.updateFirst(query, update, PaymentBatch.class);
         return result.getModifiedCount() == 1;
     }
@@ -388,7 +396,7 @@ public class RoutingService {
     private String determineRoute(PaymentLineMessage message) {
         String classification = message.getRoutingClassification();
         if ("ON_US".equals(classification)) return "ONUS";
-        if ("OFF_US".equals(classification)) return "OFFUS";
+        if ("OFF_US".equals(classification)) return ROUTE_OFFUS;
         return "INVALID";
     }
 
@@ -403,7 +411,7 @@ public class RoutingService {
         d.setReference(msg.getReference());
         d.setBeneficiaryName(msg.getBeneficiaryName());
         d.setBeneficiaryEmail(msg.getBeneficiaryEmail());
-        d.setStatus("PROCESSING");
+        d.setStatus(STATUS_PROCESSING);
         return d;
     }
 
