@@ -101,9 +101,10 @@ public class RoutingService {
         ensureBatchExists(message);
 
         if (!initialDebitIfNeeded(message)) {
+            String reason = getBatchFailureReason(message.getBatchId());
             detail.setStatus("REJECTED");
             detail.setErrorCode("BATCH_DEBIT_FAILED");
-            detail.setErrorMessage("No se acreditó: falló el débito inicial del monto total del lote (fondos insuficientes u otro error en la cuenta de origen).");
+            detail.setErrorMessage("No se acreditó: " + reason);
             detail.setProcessedAt(LocalDateTime.now(SERVICE_ZONE));
             detailRepository.save(detail);
             updateBatchCounters(message, false);
@@ -250,11 +251,12 @@ public class RoutingService {
             log.info("[RF-03][DEBIT] Débito inicial exitoso para batchId={}", batchId);
             success = true;
         } catch (Exception e) {
-            log.error("[RF-03][DEBIT] Débito inicial fallido para batchId={}: {}", batchId, e.getMessage());
+            String reason = resolveDebitFailureReason(e);
+            log.error("[RF-03][DEBIT] Débito inicial fallido para batchId={}: {}", batchId, reason);
             Query failQuery = new Query(Criteria.where(FIELD_BATCH_ID).is(batchId));
             Update failUpdate = new Update()
                     .set(FIELD_STATUS, STATUS_FAILED)
-                    .set("failureReason", e.getMessage())
+                    .set("failureReason", reason)
                     .set(FIELD_UPDATED_AT, LocalDateTime.now(SERVICE_ZONE));
             mongoTemplate.updateFirst(failQuery, failUpdate, PaymentBatch.class);
             success = false;
@@ -262,6 +264,30 @@ public class RoutingService {
 
         outcome.complete(success);
         return success;
+    }
+
+    // Traduce el error del débito a un mensaje legible; account-core devuelve
+    // {"error": "Insufficient balance in account: ..."} con HTTP 400 en ese caso.
+    private String resolveDebitFailureReason(Exception e) {
+        if (e instanceof org.springframework.web.client.HttpStatusCodeException httpEx) {
+            String body = httpEx.getResponseBodyAsString();
+            if (body != null && body.contains("Insufficient balance")) {
+                return "Fondos insuficientes en la cuenta de origen.";
+            }
+            if (body != null && !body.isBlank()) {
+                return body;
+            }
+        }
+        return e.getMessage();
+    }
+
+    private String getBatchFailureReason(String batchId) {
+        PaymentBatch batch = mongoTemplate.findOne(
+                new Query(Criteria.where(FIELD_BATCH_ID).is(batchId)), PaymentBatch.class);
+        if (batch != null && batch.getFailureReason() != null && !batch.getFailureReason().isBlank()) {
+            return batch.getFailureReason();
+        }
+        return "fondos insuficientes u otro error en la cuenta de origen";
     }
 
     private void updateBatchCounters(PaymentLineMessage message, boolean success) {
