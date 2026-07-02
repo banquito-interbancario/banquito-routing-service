@@ -30,12 +30,10 @@ services:
       SPRING_APPLICATION_NAME: routing-service
       SPRING_DATA_MONGODB_URI: mongodb://mongo-routing:27017/routingdb
       SPRING_MONGODB_URI: mongodb://mongo-routing:27017/routingdb
-      RABBITMQ_HOST: rabbitmq
-      RABBITMQ_PORT: "5672"
-      RABBITMQ_USERNAME: guest
-      RABBITMQ_PASSWORD: guest
-      RABBITMQ_QUEUE: payment.lines.queue
-      RABBITMQ_CLEARING_QUEUE: clearing.outbound.queue
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS}
+      KAFKA_SASL_JAAS_CONFIG: ${KAFKA_SASL_JAAS_CONFIG}
+      KAFKA_PAYMENT_LINES_TOPIC: payment-lines
+      KAFKA_CLEARING_TOPIC: clearing-outbound
       CORE_GATEWAY_URL: http://account-core-service:8081
       CORPORATE_ACCOUNT_NUMBER: "0000000000"
       ACCOUNT_CORE_GRPC_HOST: account-core-service

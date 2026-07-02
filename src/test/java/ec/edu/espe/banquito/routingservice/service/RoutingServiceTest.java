@@ -21,7 +21,7 @@ import org.mockito.quality.Strictness;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.dao.DuplicateKeyException;
 import com.mongodb.client.result.UpdateResult;
 import org.springframework.data.mongodb.core.FindAndModifyOptions;
@@ -60,15 +60,14 @@ class RoutingServiceTest {
     private NotificationGrpcClient notificationClient;
 
     @Mock
-    private RabbitTemplate rabbitTemplate;
+    private KafkaTemplate<String, Object> kafkaTemplate;
 
     @InjectMocks
     private RoutingService routingService;
 
     @BeforeEach
     void setUp() {
-        ReflectionTestUtils.setField(routingService, "clearingExchange", "clearing.exchange");
-        ReflectionTestUtils.setField(routingService, "clearingRoutingKey", "clearing.outbound");
+        ReflectionTestUtils.setField(routingService, "clearingTopic", "clearing-outbound");
         ReflectionTestUtils.setField(routingService, "fallbackCorporateAccount", "0000000000");
         ReflectionTestUtils.setField(routingService, "localCompletionEnabled", false);
 
@@ -111,7 +110,7 @@ class RoutingServiceTest {
 
         // RF-03: flujo Off-Us adapta el registro y lo publica en la Cola de Salida
         ArgumentCaptor<OffUsClearingMessage> clearingCaptor = ArgumentCaptor.forClass(OffUsClearingMessage.class);
-        verify(rabbitTemplate).convertAndSend(eq("clearing.exchange"), eq("clearing.outbound"), clearingCaptor.capture());
+        verify(kafkaTemplate).send(eq("clearing-outbound"), eq(BATCH_1), clearingCaptor.capture());
 
         OffUsClearingMessage adapted = clearingCaptor.getValue();
         assertThat(adapted.getBatchId()).hasToString(BATCH_1);
@@ -136,7 +135,7 @@ class RoutingServiceTest {
         routingService.processPaymentLine(message);
 
         verify(accountCoreClient, never()).batchCredit(any(), any(), anyDouble(), any(), any());
-        verifyNoInteractions(rabbitTemplate);
+        verifyNoInteractions(kafkaTemplate);
 
         ArgumentCaptor<PaymentDetail> captor = ArgumentCaptor.forClass(PaymentDetail.class);
         verify(detailRepository, atLeast(2)).save(captor.capture());
@@ -185,8 +184,8 @@ class RoutingServiceTest {
             PaymentLineMessage message = buildMessage(BATCH_2, 1, code, "OFF_US", "0009999999", 50.0);
             routingService.processPaymentLine(message);
         }
-        verify(rabbitTemplate, times(offusCodes.length))
-                .convertAndSend(eq("clearing.exchange"), eq("clearing.outbound"), any(OffUsClearingMessage.class));
+        verify(kafkaTemplate, times(offusCodes.length))
+                .send(eq("clearing-outbound"), eq(BATCH_2), any(OffUsClearingMessage.class));
     }
 
     private PaymentLineMessage buildMessage(String batchId, int lineNumber,

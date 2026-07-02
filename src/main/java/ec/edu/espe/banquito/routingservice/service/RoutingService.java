@@ -14,8 +14,8 @@ import ec.edu.espe.banquito.routingservice.model.PaymentLineMessage;
 import ec.edu.espe.banquito.routingservice.repository.PaymentDetailRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.amqp.rabbit.annotation.RabbitListener;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.mongodb.core.FindAndModifyOptions;
@@ -52,13 +52,10 @@ public class RoutingService {
     private final AccountCoreRestClient accountCoreClient;
     private final TariffGrpcClient tariffClient;
     private final NotificationGrpcClient notificationClient;
-    private final RabbitTemplate rabbitTemplate;
+    private final KafkaTemplate<String, Object> kafkaTemplate;
 
-    @Value("${app.rabbitmq.clearing-exchange:clearing.exchange}")
-    private String clearingExchange;
-
-    @Value("${app.rabbitmq.clearing-routing-key:clearing.outbound}")
-    private String clearingRoutingKey;
+    @Value("${app.kafka.clearing-topic:clearing-outbound}")
+    private String clearingTopic;
 
     @Value("${account.core.corporate.account-number:0000000000}")
     private String fallbackCorporateAccount;
@@ -74,17 +71,19 @@ public class RoutingService {
                           AccountCoreRestClient accountCoreClient,
                           TariffGrpcClient tariffClient,
                           NotificationGrpcClient notificationClient,
-                          RabbitTemplate rabbitTemplate) {
+                          KafkaTemplate<String, Object> kafkaTemplate) {
         this.detailRepository = detailRepository;
         this.mongoTemplate = mongoTemplate;
         this.accountCoreClient = accountCoreClient;
         this.tariffClient = tariffClient;
         this.notificationClient = notificationClient;
-        this.rabbitTemplate = rabbitTemplate;
+        this.kafkaTemplate = kafkaTemplate;
     }
 
-    // RF-03: Consume payment lines with 5-20 concurrent workers
-    @RabbitListener(queues = "${app.rabbitmq.payment-lines-queue}", concurrency = "5-20")
+    // RF-03: Consume payment lines with concurrent workers (concurrency set via
+    // app.kafka.consumer-concurrency; Kafka concurrency is capped by topic partition count)
+    @KafkaListener(topics = "${app.kafka.payment-lines-topic}", groupId = "${spring.kafka.consumer.group-id:routing-service}",
+            concurrency = "${app.kafka.consumer-concurrency:5}")
     public void processPaymentLine(PaymentLineMessage message) {
         log.info("Received payment line: batchId={}, lineNumber={}", message.getBatchId(), message.getLineNumber());
 
@@ -131,7 +130,7 @@ public class RoutingService {
             case ROUTE_OFFUS -> {
                 try {
                     OffUsClearingMessage clearingMessage = adaptForClearingHouse(message);
-                    rabbitTemplate.convertAndSend(clearingExchange, clearingRoutingKey, clearingMessage);
+                    kafkaTemplate.send(clearingTopic, clearingMessage.getBatchId().toString(), clearingMessage);
                     success = true;
                 } catch (Exception e) {
                     log.error("Off-Us routing error batchId={} line={}: {}", message.getBatchId(), message.getLineNumber(), e.getMessage());

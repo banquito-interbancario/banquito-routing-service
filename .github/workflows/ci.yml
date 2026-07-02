@@ -27,15 +27,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      rabbitmq:
-        image: rabbitmq:3.13-alpine
-        ports:
-          - 5672:5672
-        options: >-
-          --health-cmd "rabbitmq-diagnostics check_port_connectivity"
-          --health-interval 15s
-          --health-timeout 10s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
